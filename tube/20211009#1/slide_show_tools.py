@@ -42,6 +42,150 @@ class StripRelocation:
                                                         self.strip.channel + channel_movement)
         
 
+
+class SLIDE_TOOLS_OT_resizing_strips(bpy.types.Operator):
+    bl_description = 'resize selected strips.'
+    bl_idname = 'slide_tools.resizing_strips'
+    bl_label = 'Resizing Strips'
+    
+    new_strip_duration: bpy.props.IntProperty(
+        name='Duration',
+        description='Length of the strips in frame from left handle to right handle.',
+        default=1,
+        )
+    
+    def invoke(self, context, event):
+        wm = context.window_manager
+        return wm.invoke_props_dialog(self)
+        
+    def execute(self, context):
+        for strip in context.selected_editable_strips:
+            strip.duration = self.new_strip_duration
+        self.report({'INFO'}, 'resized strips : {}'.format(len(context.selected_editable_strips)))
+        return {'FINISHED'}  
+
+class SLIDE_TOOLS_OT_beat_strips(bpy.types.Operator):
+    bl_description = 'resize and align selected strips with music beat.'
+    bl_idname = 'slide_tools.beat_strips'
+    bl_label = 'Beat Strips'
+    
+    frame_overlap: bpy.props.IntProperty(
+        name='Frame Overlap',
+        description='amount of the overlap between strips',
+        default=0,
+        )
+    
+    beats_per_strip: bpy.props.IntProperty(
+        name='Beats per Strip',
+        description='Number of beats you\'d like the strip to be visible',
+        default=4,
+        )
+    
+    song_bpm: bpy.props.IntProperty(
+        name='BPM',
+        description='beats per minute',
+        default=120,
+        )
+    
+    fps: bpy.props.IntProperty(
+        name='Frame Rate',
+        description='Frames per second.',
+        default=24,
+        )
+    
+    def invoke(self, context, event):
+        wm = context.window_manager
+        return wm.invoke_props_dialog(self)
+
+    def execute(self, context):
+        seconds_per_beat = 60.0/self.song_bpm
+        frames_per_beat = self.fps * seconds_per_beat
+        # Resize strips.
+        for strip in context.selected_editable_strips:
+            strip.duration = int(frames_per_beat * self.beats_per_strip + self.frame_overlap)
+            
+        # get selected strips.
+        relocations = list()
+        unselected_strips = list()
+        for strip in context.strips: 
+            if strip.select:
+                strip_relocation = StripRelocation(strip)
+                relocations.append(strip_relocation)
+            else:
+                unselected_strips.append(strip)
+
+        # check the list empty.
+        if not relocations:
+            self.report({'WARNING'}, 'There is no selection')
+            return {'CANCELLED'}
+
+        # sort the strips by the order of the frame number.
+        relocations = sorted(relocations, key=lambda x: (x.strip.left_handle + x.strip.right_handle), reverse=False)
+
+        # calc the start frame and channel of the strip for relocating it.
+        previous_relocation = None
+        first_relocation = None
+        for idx, relocation in enumerate(relocations):
+            if previous_relocation:
+                relocation.left_handle = previous_relocation.left_handle \
+                                             + previous_relocation.duration \
+                                             - self.frame_overlap
+                if self.frame_overlap > 0:
+                    if idx % 2:
+                        relocation.channel = first_relocation.channel + 1
+                    else:
+                        relocation.channel = first_relocation.channel
+                else:
+                    relocation.channel = first_relocation.channel
+            else:
+                first_relocation = relocation
+            previous_relocation = relocation
+
+        # check the collision
+        for relocation in relocations:
+            # check the collision among the selected strips
+            for relocation2 in relocations:
+                if relocation2 is not relocation:
+                    if relocation.check_collision(relocation2):
+                        self.report({'WARNING'}, 'unable to align : collision among the selected strips')
+                        return {'CANCELLED'}
+            # check the collision with the unselected strips
+            for unselected_strip in unselected_strips:
+                if relocation.check_collision(unselected_strip):
+                    self.report({'WARNING'}, 'unable to align : collision with the unselected strips')
+                    return {'CANCELLED'}
+        
+        # relocating the strips
+        relocation_total = len(relocations)
+        relocation_count = 0
+        while relocations:
+            count_before = len(relocations)
+            for relocation in relocations:
+                if not relocation.check_need_to_relocate():
+                    relocations.remove(relocation)
+                    continue
+                # check the place(frame area and channel) of this relocation is available.
+                collision = False
+                for relocation2 in relocations:
+                    if relocation2 is not relocation:
+                        if relocation.check_collision(relocation2.strip):
+                            collision = True
+                            break
+                if not collision:
+                    relocation.relocate()
+                    relocations.remove(relocation)
+                    relocation_count += 1
+            # CAUTION : loop infinitely
+            #   when you find out len(relocations) unchanged, it may fall infinite repeats of this loop.
+            if len(relocations) == count_before:
+                self.report({'WARNING'}, 'can not be done successfully : unknown')
+                # there are somethings maybe to undo, when you get relocation_count != 0
+                if relocation_count != 0:
+                    return {'FINISHED'}
+                return {'CANCELLED'}
+        self.report({'INFO'}, 'relocate strips : {}/{}'.format(relocation_count, relocation_total))
+        return {'FINISHED'}
+
 class SLIDE_TOOLS_OT_align_strips(bpy.types.Operator):
     bl_description = 'align selected strips with given gap'
     bl_idname = 'slide_tools.align_strips'
@@ -198,6 +342,8 @@ class SLIDE_TOOLS_MT_main(bpy.types.Menu):
         layout = self.layout
         layout.operator(SLIDE_TOOLS_OT_align_strips.bl_idname, text="Align Strips", icon='ALIGN_FLUSH')
         layout.operator(SLIDE_TOOLS_OT_cross_strips.bl_idname, text="Cross Strips", icon='NONE')
+        layout.operator(SLIDE_TOOLS_OT_beat_strips.bl_idname, text="BPM Strips", icon='NONE')
+        layout.operator(SLIDE_TOOLS_OT_resizing_strips.bl_idname, text="Resize Strips", icon='NONE')
 
 
 def menu_draw(self, context):
@@ -208,11 +354,15 @@ def menu_draw(self, context):
 def register():
     bpy.utils.register_class(SLIDE_TOOLS_OT_align_strips)
     bpy.utils.register_class(SLIDE_TOOLS_OT_cross_strips)
+    bpy.utils.register_class(SLIDE_TOOLS_OT_resizing_strips)
+    bpy.utils.register_class(SLIDE_TOOLS_OT_beat_strips)
     bpy.utils.register_class(SLIDE_TOOLS_MT_main)
     bpy.types.SEQUENCER_HT_header.append(menu_draw)
 
 def unregister():
     bpy.utils.unregister_class(SLIDE_TOOLS_OT_align_strips)
     bpy.utils.unregister_class(SLIDE_TOOLS_OT_cross_strips)
+    bpy.utils.unregister_class(SLIDE_TOOLS_OT_resizing_strips)
+    bpy.utils.unregister_class(SLIDE_TOOLS_OT_beat_strips)
     bpy.utils.unregister_class(SLIDE_TOOLS_MT_main)
     bpy.types.SEQUENCER_HT_header.remove(menu_draw)
